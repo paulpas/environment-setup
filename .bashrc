@@ -106,3 +106,78 @@ unset safe_term match_lhs
 # Try to enable the "Command not found" hook ("pacman -S pkgfile" to install it).
 # See also: https://wiki.archlinux.org/index.php/Bash#The_.22command_not_found.22_hook
 [ -r /usr/share/doc/pkgfile/command-not-found.bash ] && . /usr/share/doc/pkgfile/command-not-found.bash
+
+alias githist='git log --stat -p'
+alias git-tree='git log --oneline --decorate --all --graph'
+alias dev='gimme-aws-creds --profile=dev; export AWS_PROFILE=11111111111111-/Foo'
+alias devops='gimme-aws-creds --profile=devops; export AWS_PROFILE=222222222222-/Bar'
+alias setSandbox='export AWS_REGION=us-west-2 export AWS_PROFILE=222222222222-/Bar NAMESPACE=sandbox01 KUBECONFIG=$HOME/.kube/config.sandbox && aws eks --region ${AWS_REGION} update-kubeconfig --name name-of-eks'
+alias currentk8s="kubectl config current-context 2>/dev/null | awk -F$'[ /]' '{print \$NF}' | grep . || echo no-k8s-cluster"
+alias currentTFworkspace="[[ -f .terraform/environment ]] && cat .terraform/environment || echo "none""
+alias currentTFversion="terraform -version | awk '/^Terraform/ {print \$2}' || echo "none""
+alias secret='aws secretsmanager list-secrets | jq -r ".SecretList[].Name" | while read i; do echo $i; aws secretsmanager get-secret-value --secret-id $i | jq -r ".SecretString" | jq -r . ; done'
+alias scat="sdiff \$1 \$2 | sed -r 's/[<>|]//;s/(\t){3}//'"
+alias disable_screen='sudo nvram boot-args="iog=0x0"'
+alias enable_screen='sudo nvram -d boot-args'
+alias flushdns='sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder'
+
+function parse_git_branch() {
+     git branch 2> /dev/null | sed -e '/^[^*]/d' -e 's/* \(.*\)/[\1]/'
+}
+
+if [[ $AWS_PROFILE == 326869200699-/OktaInfrastructure ]]; then
+    account_id=Development
+elif [[ $AWS_PROFILE == 183547466896-/OktaInfrastructure ]]; then
+    account_id=DevOps
+else
+    account_id=none
+fi
+
+ function calculate_date() {
+     d1=$(gdate --utc --date="$(echo $EXPIRATION)" +%s)
+     d2=$(gdate --utc +%s)
+     EXPIRATION_TIME=$(echo $(( (d1 - d2) / 86400 )) days)
+     echo -n "$1 SSL certificate "
+     if [[ ${EXPIRATION_TIME} != "0 days" ]]; then
+         echo -n "$i "
+         echo ": ${EXPIRATION_TIME}"
+         echo
+     fi
+ }
+
+ function get_linkerd_cert_expiration() {
+     EXPIRATION=$(kubectl -n linkerd get secret linkerd-identity-issuer -o jsonpath="{.data['crt\.pem']}" | base64 -d | openssl x509 -text | awk -F' :' '/Not After :/{print $2}')
+     calculate_date "Linkerd"
+ }
+
+ function get_all_linkerd_cert_expiration() {
+     (setSandbox && echo -n "$NAMESPACE " && get_linkerd_cert_expiration && echo) 2>/dev/null
+ }
+
+function aws_ebs_encryption_check () {
+    for region in $(aws ec2 describe-regions --region us-east-1 --query "Regions[*].[RegionName]" --output text); do
+        default=$(aws ec2 get-ebs-encryption-by-default --region $region --query "{Encryption_By_Default:EbsEncryptionByDefault}" --output text)
+        kms_key=$(aws ec2 get-ebs-default-kms-key-id --region $region | jq '.KmsKeyId')
+        echo "$region  --- $default  --- $kms_key"
+    done
+}
+
+function aws_enable_ebs_encryption () {
+    for region in $(aws ec2 describe-regions --region us-east-1 --query "Regions[*].[RegionName]" --output text); do
+        default=$(aws ec2 enable-ebs-encryption-by-default --region $region --query "{Encryption_By_Default:EbsEncryptionByDefault}" --output text)
+        kms_key=$(aws ec2 get-ebs-default-kms-key-id --region $region | jq '.KmsKeyId')
+        echo "$region  --- $default  --- $kms_key"
+    done
+}
+
+export PS1="\u:\w\[\e[40m\]:[\[\e[m\]\[\e[44m\]aws::${account_id}\[\e[m\]]-[\[\e[m\]\[\e[44m\]k8s::$(currentk8s)\[\e[m\]]-[\[\e[m\]\[\e[44m\]tfver::$(currentTFversion)\[\e[m\]]-[\[\e[m\]\[\e[44m\]tfwrk::$(currentTFworkspace)\[\e[m\]]-((\e[44m\]git::$(parse_git_branch)\[\e[m\])):\n └─\[\033[0m\033[0;32m\] `[ $(id -u) == "0" ] && echo "#" || echo '$'` \[\033[0m\033[0;32m\] ▶\[\033[0m\] "
+PROMPT_COMMAND="source ~/bashrc"
+
+
+export ARTIFACTORY_USERNAME=${USER}
+export ARTIFACTORY_URL=https://
+export ARTIFACTORY_API=xxxxxxxxxxxxxxxxxxxxxxx
+export ARTIFACTORY_API_KEY=$ARTIFACTORY_API
+
+
+set -o vi
