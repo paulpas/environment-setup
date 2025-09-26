@@ -96,24 +96,25 @@ function get_account_id() {
     fi
 }
 
-currentk8s () {
-    if [[ -n "$KUBECONFIG" ]]; then
-        # Get the current context and check if it's non-empty
-        current_context=$(kubectl config current-context 2> /dev/null)
-        
-        if [[ -n "$current_context" ]]; then
-            # Check if it's an AWS ARN formatted context
-            if [[ "$current_context" =~ arn:aws ]]; then
-                current_k8s=$(echo "$current_context" | awk -F'[ /]' '{print $NF}')
-                echo "$current_k8s"
-            else
-                echo "$current_context"
-            fi
-        else
-            echo "none"
-        fi
+function currentk8s() {
+    #if [[ -z "${KUBECONFIG:-}" || "${KUBECONFIG}" == "null" ]]; then
+    #    current_k8s="no-k8s-cluster"
+    #    return
+    #fi
+
+    local ctx
+    ctx=$(kubectl config current-context 2>/dev/null)
+
+    if [[ -z "$ctx" ]]; then
+        current_k8s="none"
+        return
+    fi
+
+    if [[ "$ctx" =~ arn:aws ]]; then
+        current_k8s="${ctx##*/}"
+        current_k8s="${current_k8s##* }"
     else
-        echo "none"
+        current_k8s="$ctx"
     fi
 }
 
@@ -169,6 +170,8 @@ alias phf='cat ~/.persistent_history|grep --color' # find a search term in entir
 #alias phtrim='tail -20000 ~/.persistent_history | tee ~/.persistent_history' # trim history, commented out because I never use it
 alias phlast='tail -15 ~/.persistent_history' # print last N history
 alias phfr='tail -50 ~/.persistent_history | grep --color' # find a search term from last N entries
+
+[[ -z "$PROMPT_COMMAND" ]] && PROMPT_COMMAND=":"
 
 # Update all cached values once per command execution
 PROMPT_COMMAND="get_account_id; currentk8s >/dev/null ; update_tf_version >/dev/null; update_tf_workspace >/dev/null; parse_git_branch >/dev/null; update_zsh_profile ; source ~/.bashrc; run_on_prompt_command"
