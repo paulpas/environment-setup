@@ -351,6 +351,9 @@ function ktcpdump() {
   trap - SIGINT
 }
 
+function kube-resources() {
+    kubectl api-resources -o wide | (head -n 1 && tail -n +2 | sort)
+}
 
 #THIS MUST BE AT THE END OF THE FILE FOR SDKMAN TO WORK!!!
 #export SDKMAN_DIR="$HOME/.sdkman"
