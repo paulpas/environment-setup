@@ -96,12 +96,25 @@ function get_account_id() {
     fi
 }
 
-function currentk8s() {
-  if [[ ${KUBECONFIG} != "null" ]]; then
-    current_k8s=$(kubectl config current-context 2>/dev/null | awk -F$'[ /]' '/arn:aws/ {print $NF}' | grep .)
-  else
-    current_k8s="no-k8s-cluster"
-  fi
+currentk8s () {
+    if [[ -n "$KUBECONFIG" ]]; then
+        # Get the current context and check if it's non-empty
+        current_context=$(kubectl config current-context 2> /dev/null)
+        
+        if [[ -n "$current_context" ]]; then
+            # Check if it's an AWS ARN formatted context
+            if [[ "$current_context" =~ arn:aws ]]; then
+                current_k8s=$(echo "$current_context" | awk -F'[ /]' '{print $NF}')
+                echo "$current_k8s"
+            else
+                echo "$current_context"
+            fi
+        else
+            echo "none"
+        fi
+    else
+        echo "none"
+    fi
 }
 
 function update_tf_version() {
