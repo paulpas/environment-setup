@@ -355,6 +355,31 @@ function kube-resources() {
     kubectl api-resources -o wide | (head -n 1 && tail -n +2 | sort)
 }
 
+which_extended() {
+    local command_name="$1"
+
+    # Check if it's a shell function first
+    if declare -F "$command_name" > /dev/null; then
+        echo -e "Function '$command_name' is defined as follows:"
+        declare -f "$command_name"
+        return 0
+    fi
+
+    # Check if the command is an alias
+    if alias "$command_name" 2>/dev/null; then
+        return 0
+    fi
+
+    # Use type -a to reveal more information than which
+    type -a "$command_name" 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo "Command '$command_name' not found."
+    fi
+}
+
+# Add alias to extend 'which' command
+alias which=which_extended
+
 #THIS MUST BE AT THE END OF THE FILE FOR SDKMAN TO WORK!!!
 #export SDKMAN_DIR="$HOME/.sdkman"
 #[[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"
