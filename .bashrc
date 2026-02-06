@@ -294,30 +294,71 @@ function aws_enable_ebs_encryption () {
 pyapi() {
     if [ -z "$1" ]; then
         echo "Usage: pyapi <module_name> [search_term]"
+        echo ""
+        echo "Environment Variables:"
+        echo "  Provider Selection (checks in order):"
+        echo "    ANTHROPIC_API_KEY  - Use Anthropic Claude API"
+        echo "    OPENAI_API_KEY     - Use OpenAI/LiteLLM API"
+        echo ""
+        echo "  Anthropic Configuration:"
+        echo "    ANTHROPIC_API_KEY  - API key for Anthropic"
+        echo "    ANTHROPIC_MODEL    - Model (default: claude-sonnet-4-20250514)"
+        echo ""
+        echo "  OpenAI/LiteLLM Configuration:"
+        echo "    OPENAI_API_KEY     - API key for OpenAI/LiteLLM"
+        echo "    OPENAI_BASE_URL    - API base URL (default: https://api.openai.com)"
+        echo "    OPENAI_MODEL       - Model (default: gpt-4o)"
         return 1
     fi
     
     if ! command -v glow &> /dev/null; then
-        echo "❌ Error: 'glow' is required but not installed."
+        echo "Error: 'glow' is required but not installed."
         return 1
     fi
     
     if ! command -v uv &> /dev/null; then
-        echo "❌ Error: 'uv' is required but not installed."
+        echo "Error: 'uv' is required but not installed."
         echo "Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
         return 1
     fi
     
     local tmpfile=$(mktemp)
     
-    MODULE_NAME="$1" SEARCH_TERM="${2:-}" OPENAI_API_KEY="${OPENAI_API_KEY:-}" OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com}" OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o}" python3 << 'PYEOF' > "$tmpfile" 2>&1
+    MODULE_NAME="$1" \
+    SEARCH_TERM="${2:-}" \
+    ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+    ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}" \
+    OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+    OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com}" \
+    OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o}" \
+    python3 << 'PYEOF' > "$tmpfile" 2>&1
 import sys, importlib, inspect, os, json, subprocess, re, tempfile, shutil
 import pkgutil
+
 module_name = os.environ.get("MODULE_NAME", "")
 search_term = os.environ.get("SEARCH_TERM", "").lower()
-api_key = os.environ.get("OPENAI_API_KEY", "")
-base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
-model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+
+# Provider detection - Anthropic takes priority if set
+anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+anthropic_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+openai_api_key = os.environ.get("OPENAI_API_KEY", "")
+openai_base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+openai_model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+
+# Determine active provider
+if anthropic_api_key:
+    provider = "anthropic"
+    api_key = anthropic_api_key
+    model = anthropic_model
+elif openai_api_key:
+    provider = "openai"
+    api_key = openai_api_key
+    model = openai_model
+else:
+    provider = None
+    api_key = ""
+    model = ""
+
 if not module_name:
     print("Error: No module specified")
     sys.exit(1)
@@ -346,8 +387,51 @@ def get_package_name(module_name):
         return parts[0]
     return module_name
 
+def is_stdlib_module(module_name):
+    """Check if a module is part of Python's standard library"""
+    # Get the root module name
+    root_module = module_name.split('.')[0]
+    
+    # Comprehensive list of Python stdlib modules
+    stdlib_modules = {
+        # Built-in modules
+        'abc', 'aifc', 'argparse', 'array', 'ast', 'asynchat', 'asyncio', 'asyncore',
+        'atexit', 'audioop', 'base64', 'bdb', 'binascii', 'binhex', 'bisect',
+        'builtins', 'bz2', 'calendar', 'cgi', 'cgitb', 'chunk', 'cmath', 'cmd',
+        'code', 'codecs', 'codeop', 'collections', 'colorsys', 'compileall',
+        'concurrent', 'configparser', 'contextlib', 'contextvars', 'copy', 'copyreg',
+        'cProfile', 'crypt', 'csv', 'ctypes', 'curses', 'dataclasses', 'datetime',
+        'dbm', 'decimal', 'difflib', 'dis', 'distutils', 'doctest', 'email',
+        'encodings', 'enum', 'errno', 'faulthandler', 'fcntl', 'filecmp', 'fileinput',
+        'fnmatch', 'fractions', 'ftplib', 'functools', 'gc', 'getopt', 'getpass',
+        'gettext', 'glob', 'graphlib', 'grp', 'gzip', 'hashlib', 'heapq', 'hmac',
+        'html', 'http', 'idlelib', 'imaplib', 'imghdr', 'imp', 'importlib', 'inspect',
+        'io', 'ipaddress', 'itertools', 'json', 'keyword', 'lib2to3', 'linecache',
+        'locale', 'logging', 'lzma', 'mailbox', 'mailcap', 'marshal', 'math',
+        'mimetypes', 'mmap', 'modulefinder', 'multiprocessing', 'netrc', 'nis',
+        'nntplib', 'numbers', 'operator', 'optparse', 'os', 'ossaudiodev', 'pathlib',
+        'pdb', 'pickle', 'pickletools', 'pipes', 'pkgutil', 'platform', 'plistlib',
+        'poplib', 'posix', 'posixpath', 'pprint', 'profile', 'pstats', 'pty', 'pwd',
+        'py_compile', 'pyclbr', 'pydoc', 'queue', 'quopri', 'random', 're',
+        'readline', 'reprlib', 'resource', 'rlcompleter', 'runpy', 'sched', 'secrets',
+        'select', 'selectors', 'shelve', 'shlex', 'shutil', 'signal', 'site',
+        'smtpd', 'smtplib', 'sndhdr', 'socket', 'socketserver', 'spwd', 'sqlite3',
+        'ssl', 'stat', 'statistics', 'string', 'stringprep', 'struct', 'subprocess',
+        'sunau', 'symtable', 'sys', 'sysconfig', 'syslog', 'tabnanny', 'tarfile',
+        'telnetlib', 'tempfile', 'termios', 'test', 'textwrap', 'threading', 'time',
+        'timeit', 'tkinter', 'token', 'tokenize', 'tomllib', 'trace', 'traceback',
+        'tracemalloc', 'tty', 'turtle', 'turtledemo', 'types', 'typing', 'unicodedata',
+        'unittest', 'urllib', 'uu', 'uuid', 'venv', 'warnings', 'wave', 'weakref',
+        'webbrowser', 'winreg', 'winsound', 'wsgiref', 'xdrlib', 'xml', 'xmlrpc',
+        'zipapp', 'zipfile', 'zipimport', 'zlib', 'zoneinfo',
+        # Also include _-prefixed internal modules
+        '_thread', '__future__',
+    }
+    
+    return root_module in stdlib_modules
+
 def setup_venv():
-    """Create venv with uv and install the target module"""
+    """Create venv with uv and install the target module if needed"""
     try:
         # Create venv with uv
         result = subprocess.run(
@@ -357,13 +441,19 @@ def setup_venv():
             timeout=30
         )
         if result.returncode != 0:
-            print(f"❌ Failed to create venv: {result.stderr}")
+            print(f"Failed to create venv: {result.stderr}", file=sys.stderr)
             return False
+        
+        # Check if this is a stdlib module - no installation needed
+        if is_stdlib_module(module_name):
+            print(f"📦 `{module_name}` is a standard library module (no installation needed)", file=sys.stderr)
+            return True
         
         # Determine package to install
         package_to_install = get_package_name(module_name)
         
         # Install the package
+        print(f"📦 Installing `{package_to_install}` from PyPI...", file=sys.stderr)
         pip_path = os.path.join(temp_venv, 'bin', 'pip')
         result = subprocess.run(
             ['uv', 'pip', 'install', '--python', os.path.join(temp_venv, 'bin', 'python'), package_to_install],
@@ -372,12 +462,12 @@ def setup_venv():
             timeout=120
         )
         if result.returncode != 0:
-            print(f"❌ Failed to install {package_to_install}: {result.stderr}")
+            print(f"Failed to install {package_to_install}: {result.stderr}", file=sys.stderr)
             return False
         
         return True
     except Exception as e:
-        print(f"❌ Error setting up venv: {e}")
+        print(f"Error setting up venv: {e}", file=sys.stderr)
         return False
 
 def extract_code_from_markdown(text):
@@ -399,36 +489,83 @@ def execute_code(code):
             [python_path, temp_file],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=10  # Increased timeout for slower operations
         )
         
         os.unlink(temp_file)
         
         output = ""
         if result.stdout:
-            output += result.stdout
-        if result.stderr:
-            output += "\nErrors:\n" + result.stderr
+            output += result.stdout.strip()
+        if result.stderr and result.returncode != 0:
+            # Only include stderr if there was an error
+            if output:
+                output += "\n"
+            output += result.stderr.strip()
         
-        return output.strip() if output.strip() else "(no output)", result.returncode
+        return output if output else "(no output)", result.returncode
         
     except subprocess.TimeoutExpired:
-        return "(execution timed out after 5 seconds)", 1
+        try:
+            os.unlink(temp_file)
+        except:
+            pass
+        return "(execution timed out after 10 seconds)", 1
     except Exception as e:
         return f"(execution error: {e})", 1
 
-def call_api(prompt):
-    """Call LiteLLM API using curl to avoid Cloudflare blocks"""
-    if not api_key:
-        return None, "No API key set"
+def call_anthropic_api(prompt):
+    """Call Anthropic Claude API using curl"""
+    payload = {
+        "model": anthropic_model,
+        "max_tokens": 600,
+        "messages": [{"role": "user", "content": prompt}]
+    }
     
+    try:
+        result = subprocess.run(
+            [
+                'curl', '-s', '-X', 'POST', 'https://api.anthropic.com/v1/messages',
+                '-H', f'x-api-key: {anthropic_api_key}',
+                '-H', 'anthropic-version: 2023-06-01',
+                '-H', 'Content-Type: application/json',
+                '-d', json.dumps(payload)
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode != 0:
+            return None, f"curl failed: {result.stderr}"
+        
+        try:
+            response = json.loads(result.stdout)
+            if "error" in response:
+                return None, f"API Error: {response['error'].get('message', response['error'])}"
+            # Anthropic returns content as an array of content blocks
+            content_blocks = response.get("content", [])
+            if content_blocks:
+                # Extract text from content blocks
+                text_parts = [block.get("text", "") for block in content_blocks if block.get("type") == "text"]
+                return "".join(text_parts), None
+            return None, "No content in response"
+        except (json.JSONDecodeError, KeyError) as e:
+            return None, f"Invalid response: {e}\n{result.stdout[:200]}"
+    except subprocess.TimeoutExpired:
+        return None, "API call timed out"
+    except Exception as e:
+        return None, f"Error calling API: {e}"
+
+def call_openai_api(prompt):
+    """Call OpenAI/LiteLLM API using curl"""
     # Construct API URL
-    api_url = base_url.rstrip('/')
+    api_url = openai_base_url.rstrip('/')
     if not api_url.endswith('/chat/completions'):
         api_url += '/chat/completions'
     
     payload = {
-        "model": model,
+        "model": openai_model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 600,
         "temperature": 0.7
@@ -438,7 +575,7 @@ def call_api(prompt):
         result = subprocess.run(
             [
                 'curl', '-s', '-X', 'POST', api_url,
-                '-H', f'Authorization: Bearer {api_key}',
+                '-H', f'Authorization: Bearer {openai_api_key}',
                 '-H', 'Content-Type: application/json',
                 '-d', json.dumps(payload)
             ],
@@ -462,72 +599,138 @@ def call_api(prompt):
     except Exception as e:
         return None, f"Error calling API: {e}"
 
-def get_code_example(module_name, func_name, sig, doc):
-    """Get AI-generated code example for a function"""
+def call_api(prompt):
+    """Call the appropriate API based on configured provider"""
     if not api_key:
-        return "*Set OPENAI_API_KEY to see code examples*", ""
+        return None, "No API key set (set ANTHROPIC_API_KEY or OPENAI_API_KEY)"
+    
+    if provider == "anthropic":
+        return call_anthropic_api(prompt)
+    else:
+        return call_openai_api(prompt)
+
+def validate_code_has_print(code):
+    """Check if code contains a print statement"""
+    # Simple check for print() call
+    return 'print(' in code or 'print (' in code
+
+def is_valid_output(output, returncode):
+    """Check if the execution produced valid output"""
+    if returncode != 0:
+        return False
+    if not output or output.strip() == "":
+        return False
+    if output == "(no output)":
+        return False
+    # Check for common error indicators in output
+    error_indicators = ["Traceback", "Error:", "Exception:", "error:", "failed"]
+    for indicator in error_indicators:
+        if indicator in output:
+            return False
+    return True
+
+def get_code_example(module_name, func_name, sig, doc):
+    """Get AI-generated code example for a function with validation and retries"""
+    if not api_key:
+        return "*Set ANTHROPIC_API_KEY or OPENAI_API_KEY to see code examples*", ""
+    
+    max_attempts = 3
+    last_code = ""
+    last_output = ""
+    last_error = ""
     
     prompt = f"""Generate a SHORT executable Python code example for this function:
 Function: {func_name}{sig}
 Module: {module_name}
 Doc: {doc[:200]}
-CRITICAL REQUIREMENTS:
-- MUST be complete, standalone, executable code (5-8 lines max)
-- MUST print something to show the output
-- Include necessary imports
-- For Flask/web frameworks: use app.app_context() or create minimal working context
-- For functions that return objects: print the result or relevant attributes
-- Use realistic but simple example data
-- Add brief inline comments
-- No servers, no async, no user input - just code that runs and prints
-Example format:
-```python
-from flask import Flask, jsonify
-app = Flask(__name__)
-with app.app_context():
-    response = jsonify(name="John", age=30)
-    print(response.get_json())  # Output the JSON data
-```
-Provide ONLY the code in a ```python block."""
-    
-    # Call API
-    example_text, error = call_api(prompt)
-    if error:
-        return f"*Could not generate example: {error}*", ""
-    
-    # Extract and execute code
-    code = extract_code_from_markdown(example_text)
-    output, returncode = execute_code(code)
-    
-    # If execution failed, ask AI to fix it
-    if returncode != 0:
-        fix_prompt = f"""The following code example FAILED with this error:
-```python
-{code}
-```
-Error output:
-{output}
 
-Generate a FIXED version that will execute successfully. Follow the same requirements:
-- MUST be complete, standalone, executable code (5-8 lines max)
-- MUST print something to show the output
-- Include necessary imports
-- For Flask/web frameworks: use app.app_context() or create minimal working context
-- Use realistic but simple example data
-- No servers, no async, no user input
+CRITICAL REQUIREMENTS:
+1. Code MUST be complete and standalone (include ALL imports)
+2. Code MUST call print() to display output - THIS IS MANDATORY
+3. Code must be 5-10 lines max
+4. Use simple, realistic example data (no external files/URLs/network)
+5. No servers, no async/await, no user input, no infinite loops
+6. For web frameworks (Flask/Django): use app context or test client
+7. For classes: instantiate and call a method, print the result
+8. Wrap any potentially failing operations in try/except
+
+GOOD EXAMPLE:
+```python
+from collections import Counter
+data = ['apple', 'banana', 'apple', 'cherry', 'banana', 'apple']
+counter = Counter(data)
+print(f"Counts: {{dict(counter)}}")
+print(f"Most common: {{counter.most_common(2)}}")
+```
+
+Provide ONLY the code in a ```python block. The code MUST print something."""
+    
+    for attempt in range(max_attempts):
+        if attempt == 0:
+            # First attempt - use initial prompt
+            example_text, error = call_api(prompt)
+            if error:
+                return f"*Could not generate example: {error}*", ""
+        else:
+            # Retry with error feedback
+            fix_prompt = f"""The previous code example FAILED. Here's what went wrong:
+
+Previous code:
+```python
+{last_code}
+```
+
+Problem: {last_error}
+Output: {last_output}
+
+Generate a WORKING version that:
+1. MUST include print() statements - this is why it failed before
+2. MUST be complete with all imports
+3. MUST NOT use external resources (files, URLs, network)
+4. Should handle edge cases gracefully
+5. Use simple hardcoded test data
+
+For module `{module_name}`, function `{func_name}`:
+- Show a realistic but simple usage
+- Print the result clearly
 
 Provide ONLY the fixed code in a ```python block."""
+            
+            example_text, error = call_api(fix_prompt)
+            if error:
+                continue
         
-        # Try to get fixed version
-        fixed_text, fix_error = call_api(fix_prompt)
-        if fix_error:
-            return example_text, f"*Original code failed. Could not get fix: {fix_error}*"
+        # Extract code
+        code = extract_code_from_markdown(example_text)
+        last_code = code
         
-        example_text = fixed_text
-        fixed_code = extract_code_from_markdown(example_text)
-        output, returncode = execute_code(fixed_code)
+        # Validate code has print statement
+        if not validate_code_has_print(code):
+            last_error = "Code does not contain any print() statements"
+            last_output = "(no print statement found)"
+            continue
+        
+        # Execute code
+        output, returncode = execute_code(code)
+        last_output = output
+        
+        # Check if execution was successful with valid output
+        if is_valid_output(output, returncode):
+            return example_text, output
+        
+        # Set error for next retry
+        if returncode != 0:
+            last_error = f"Execution failed with return code {returncode}"
+        elif not output or output == "(no output)":
+            last_error = "Code executed but produced no output (missing print?)"
+        else:
+            last_error = f"Output contains errors"
     
-    return example_text, output
+    # All attempts failed - return last attempt with error note
+    status_msg = f"*(Example may have issues after {max_attempts} attempts)*"
+    if last_output and last_output != "(no output)":
+        return example_text, f"{last_output}\n{status_msg}"
+    return example_text, status_msg
 
 # Setup venv first
 print("🔧 Setting up temporary environment...", file=sys.stderr)
@@ -609,6 +812,12 @@ except Exception as e:
     print(f"# 📚 `{module_name}` API Reference")
     print()
     
+    # Show provider info if API key is set
+    if api_key:
+        provider_name = "Anthropic Claude" if provider == "anthropic" else "OpenAI/LiteLLM"
+        print(f"🤖 **AI Provider:** {provider_name} (`{model}`)")
+        print()
+    
     if search_term:
         print(f"🔍 **Filter:** `{search_term}`")
         print()
@@ -685,7 +894,7 @@ PYEOF
         return 1
     fi
     
-    cat "$tmpfile" | glow -w 80 -
+    cat "$tmpfile" | glow -w 120 -
     rm "$tmpfile"
 }
 
