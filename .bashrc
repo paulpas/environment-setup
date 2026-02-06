@@ -302,55 +302,101 @@ pyapi() {
         return 1
     fi
     
+    if ! command -v uv &> /dev/null; then
+        echo "❌ Error: 'uv' is required but not installed."
+        echo "Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        return 1
+    fi
+    
     local tmpfile=$(mktemp)
     
-    MODULE_NAME="$1" SEARCH_TERM="${2:-}" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" python3 << 'PYEOF' > "$tmpfile" 2>&1
-import sys, importlib, inspect, os, json, subprocess, re
-from urllib.request import Request, urlopen
-
-# Read environment variables
+    MODULE_NAME="$1" SEARCH_TERM="${2:-}" OPENAI_API_KEY="${OPENAI_API_KEY:-}" OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com}" OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o}" python3 << 'PYEOF' > "$tmpfile" 2>&1
+import sys, importlib, inspect, os, json, subprocess, re, tempfile, shutil
+import pkgutil
 module_name = os.environ.get("MODULE_NAME", "")
 search_term = os.environ.get("SEARCH_TERM", "").lower()
-api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-
+api_key = os.environ.get("OPENAI_API_KEY", "")
+base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+model = os.environ.get("OPENAI_MODEL", "gpt-4o")
 if not module_name:
     print("Error: No module specified")
     sys.exit(1)
 
-def extract_code_from_markdown(text):
-    """Extract Python code from markdown code blocks
+# Create temporary venv for code execution
+temp_venv = tempfile.mkdtemp(prefix="pyapi_venv_")
+
+def cleanup_venv():
+    """Clean up temporary venv"""
+    try:
+        shutil.rmtree(temp_venv)
+    except:
+        pass
+
+import atexit
+atexit.register(cleanup_venv)
+
+def get_package_name(module_name):
+    """Extract the root package name from a module path"""
+    # Handle cases like kubernetes.client.models -> kubernetes
+    parts = module_name.split('.')
     
-    Args:
-        text: Markdown text containing ```python code blocks
+    # Common patterns
+    if len(parts) > 1:
+        # Try the first part first
+        return parts[0]
+    return module_name
+
+def setup_venv():
+    """Create venv with uv and install the target module"""
+    try:
+        # Create venv with uv
+        result = subprocess.run(
+            ['uv', 'venv', temp_venv],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode != 0:
+            print(f"❌ Failed to create venv: {result.stderr}")
+            return False
         
-    Returns:
-        Extracted Python code or original text if no code block found
-    """
+        # Determine package to install
+        package_to_install = get_package_name(module_name)
+        
+        # Install the package
+        pip_path = os.path.join(temp_venv, 'bin', 'pip')
+        result = subprocess.run(
+            ['uv', 'pip', 'install', '--python', os.path.join(temp_venv, 'bin', 'python'), package_to_install],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if result.returncode != 0:
+            print(f"❌ Failed to install {package_to_install}: {result.stderr}")
+            return False
+        
+        return True
+    except Exception as e:
+        print(f"❌ Error setting up venv: {e}")
+        return False
+
+def extract_code_from_markdown(text):
+    """Extract Python code from markdown code blocks"""
     pattern = r'```python\s*\n(.*?)```'
     matches = re.findall(pattern, text, re.DOTALL)
     return matches[0] if matches else text
 
 def execute_code(code):
-    """Execute Python code in a temporary file and capture output
-    
-    Args:
-        code: Python code string to execute
-        
-    Returns:
-        tuple: (output_string, return_code)
-        - output_string: Combined stdout/stderr or error message
-        - return_code: 0 for success, 1 for failure
-    """
+    """Execute Python code and capture output in the temporary venv"""
     try:
-        import tempfile
-        # Write code to temporary file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             f.write(code)
             temp_file = f.name
         
-        # Execute with 5 second timeout
+        # Use the venv's python
+        python_path = os.path.join(temp_venv, 'bin', 'python')
         result = subprocess.run(
-            ['python3', temp_file],
+            [python_path, temp_file],
             capture_output=True,
             text=True,
             timeout=5
@@ -358,7 +404,6 @@ def execute_code(code):
         
         os.unlink(temp_file)
         
-        # Combine stdout and stderr
         output = ""
         if result.stdout:
             output += result.stdout
@@ -372,24 +417,55 @@ def execute_code(code):
     except Exception as e:
         return f"(execution error: {e})", 1
 
-def get_code_example(module_name, func_name, sig, doc):
-    """Generate AI-powered executable code example for a function
-    
-    Uses Claude API to generate, execute, and optionally fix code examples.
-    
-    Args:
-        module_name: Name of the Python module
-        func_name: Name of the function
-        sig: Function signature string
-        doc: Function docstring
-        
-    Returns:
-        tuple: (example_markdown, execution_output)
-        - example_markdown: AI-generated code in markdown format
-        - execution_output: Result of executing the code
-    """
+def call_api(prompt):
+    """Call LiteLLM API using curl to avoid Cloudflare blocks"""
     if not api_key:
-        return "*Set ANTHROPIC_API_KEY to see code examples*", ""
+        return None, "No API key set"
+    
+    # Construct API URL
+    api_url = base_url.rstrip('/')
+    if not api_url.endswith('/chat/completions'):
+        api_url += '/chat/completions'
+    
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 600,
+        "temperature": 0.7
+    }
+    
+    try:
+        result = subprocess.run(
+            [
+                'curl', '-s', '-X', 'POST', api_url,
+                '-H', f'Authorization: Bearer {api_key}',
+                '-H', 'Content-Type: application/json',
+                '-d', json.dumps(payload)
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode != 0:
+            return None, f"curl failed: {result.stderr}"
+        
+        try:
+            response = json.loads(result.stdout)
+            if "error" in response:
+                return None, f"API Error: {response['error']}"
+            return response["choices"][0]["message"]["content"], None
+        except (json.JSONDecodeError, KeyError) as e:
+            return None, f"Invalid response: {e}\n{result.stdout[:200]}"
+    except subprocess.TimeoutExpired:
+        return None, "API call timed out"
+    except Exception as e:
+        return None, f"Error calling API: {e}"
+
+def get_code_example(module_name, func_name, sig, doc):
+    """Get AI-generated code example for a function"""
+    if not api_key:
+        return "*Set OPENAI_API_KEY to see code examples*", ""
     
     prompt = f"""Generate a SHORT executable Python code example for this function:
 Function: {func_name}{sig}
@@ -414,38 +490,24 @@ with app.app_context():
 ```
 Provide ONLY the code in a ```python block."""
     
-    try:
-        # Initial code generation request
-        data = json.dumps({
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 600,
-            "messages": [{"role": "user", "content": prompt}]
-        }).encode()
-        req = Request(
-            "https://api.anthropic.com/v1/messages",
-            data=data,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            }
-        )
-        response = urlopen(req)
-        result = json.loads(response.read())
-        example_text = result["content"][0]["text"]
-        
-        # Extract and execute code
-        code = extract_code_from_markdown(example_text)
-        output, returncode = execute_code(code)
-        
-        # If execution failed, ask AI to fix it
-        if returncode != 0:
-            fix_prompt = f"""The following code example FAILED with this error:
+    # Call API
+    example_text, error = call_api(prompt)
+    if error:
+        return f"*Could not generate example: {error}*", ""
+    
+    # Extract and execute code
+    code = extract_code_from_markdown(example_text)
+    output, returncode = execute_code(code)
+    
+    # If execution failed, ask AI to fix it
+    if returncode != 0:
+        fix_prompt = f"""The following code example FAILED with this error:
 ```python
 {code}
 ```
 Error output:
 {output}
+
 Generate a FIXED version that will execute successfully. Follow the same requirements:
 - MUST be complete, standalone, executable code (5-8 lines max)
 - MUST print something to show the output
@@ -453,64 +515,91 @@ Generate a FIXED version that will execute successfully. Follow the same require
 - For Flask/web frameworks: use app.app_context() or create minimal working context
 - Use realistic but simple example data
 - No servers, no async, no user input
-Provide ONLY the fixed code in a ```python block."""
-            
-            fix_data = json.dumps({
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 600,
-                "messages": [{"role": "user", "content": fix_prompt}]
-            }).encode()
-            
-            fix_req = Request(
-                "https://api.anthropic.com/v1/messages",
-                data=fix_data,
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
-                }
-            )
-            fix_response = urlopen(fix_req)
-            fix_result = json.loads(fix_response.read())
-            example_text = fix_result["content"][0]["text"]
-            
-            # Try executing the fixed code
-            fixed_code = extract_code_from_markdown(example_text)
-            output, returncode = execute_code(fixed_code)
-        
-        return example_text, output
-    except Exception as e:
-        return f"*Could not generate example: {e}*", ""
 
-# Main module introspection logic
-try:
-    mod = importlib.import_module(module_name)
+Provide ONLY the fixed code in a ```python block."""
+        
+        # Try to get fixed version
+        fixed_text, fix_error = call_api(fix_prompt)
+        if fix_error:
+            return example_text, f"*Original code failed. Could not get fix: {fix_error}*"
+        
+        example_text = fixed_text
+        fixed_code = extract_code_from_markdown(example_text)
+        output, returncode = execute_code(fixed_code)
     
-    # Collect all public callable items (functions, classes, methods)
+    return example_text, output
+
+# Setup venv first
+print("🔧 Setting up temporary environment...", file=sys.stderr)
+if not setup_venv():
+    sys.exit(1)
+
+try:
+    # Use the venv's python to import the module
+    python_path = os.path.join(temp_venv, 'bin', 'python')
+    
+    # Get module info using the venv's python
+    inspect_code = """
+import sys, importlib, inspect, json, pkgutil
+try:
+    mod = importlib.import_module('""" + module_name + """')
     items = []
+    
+    # Get submodules
+    if hasattr(mod, '__path__'):
+        for importer, modname, ispkg in pkgutil.iter_modules(mod.__path__, mod.__name__ + "."):
+            submod_name = modname.split('.')[-1]
+            items.append({
+                "name": submod_name,
+                "sig": "",
+                "doc": "Submodule: " + modname,
+                "type": "submodule",
+                "full_name": modname
+            })
+    
+    # Get callable items
     for name in sorted(dir(mod)):
         if not name.startswith("_"):
-            # Filter by search term if provided
-            if search_term and search_term not in name.lower():
-                continue
             obj = getattr(mod, name)
             if callable(obj):
-                # Extract first line of docstring
-                doc = (inspect.getdoc(obj) or "").split("\n")[0]
+                doc = (inspect.getdoc(obj) or "").split("\\n")[0]
                 sig = ""
                 try:
                     sig = str(inspect.signature(obj))
                 except:
                     sig = "(...)"
                 
-                # Determine object type
                 obj_type = "function"
                 if inspect.isclass(obj):
                     obj_type = "class"
                 elif inspect.ismethod(obj):
                     obj_type = "method"
                     
-                items.append((name, sig, doc, obj_type))
+                items.append({"name": name, "sig": sig, "doc": doc, "type": obj_type})
+    
+    print(json.dumps(items))
+except Exception as e:
+    import traceback
+    print(json.dumps({"error": str(e), "traceback": traceback.format_exc()}), file=sys.stderr)
+    sys.exit(1)
+"""
+    
+    result = subprocess.run(
+        [python_path, '-c', inspect_code],
+        capture_output=True,
+        text=True,
+        timeout=10
+    )
+    
+    if result.returncode != 0:
+        print(f"❌ Failed to inspect module: {result.stderr}")
+        sys.exit(1)
+    
+    items = json.loads(result.stdout)
+    
+    # Filter by search term
+    if search_term:
+        items = [item for item in items if search_term in item['name'].lower()]
     
     if not items:
         print(f"No {'matching ' if search_term else ''}functions found in '{module_name}'")
@@ -529,58 +618,73 @@ try:
     print("---")
     print()
     
-    # Generate documentation for each item
-    for name, sig, doc, obj_type in items:
-        emoji = "🔧" if obj_type == "function" else "📦" if obj_type == "class" else "⚙️"
+    for item in items:
+        name = item['name']
+        sig = item.get('sig', '')
+        doc = item.get('doc', '')
+        obj_type = item['type']
         
-        print(f"## {emoji} `{name}`")
-        print()
-        print("**Signature:**")
-        print()
-        print("```python")
-        print(f"{name}{sig}")
-        print("```")
-        print()
-        
-        if doc:
-            print(f"**Description:** {doc}")
+        if obj_type == "submodule":
+            emoji = "📦"
+            full_name = item.get('full_name', name)
+            
+            print(f"## {emoji} `{name}` (submodule)")
             print()
-        
-        # Generate and execute code example (only when filtering to specific function)
-        if search_term and api_key:
-            print("**Example:**")
+            print(f"**Full path:** `{full_name}`")
             print()
-            example, output = get_code_example(module_name, name, sig, doc)
-            print(example)
+            print(f"*💡 Use `pyapi {full_name}` to explore this submodule*")
+            print()
+        else:
+            emoji = "🔧" if obj_type == "function" else "📦" if obj_type == "class" else "⚙️"
+            
+            print(f"## {emoji} `{name}`")
+            print()
+            print("**Signature:**")
+            print()
+            print("```python")
+            print(f"{name}{sig}")
+            print("```")
             print()
             
-            if output:
-                print("**Output:**")
+            if doc:
+                print(f"**Description:** {doc}")
                 print()
-                print("```")
-                print(output)
-                print("```")
+            
+            # Generate and execute code example (only when filtering)
+            if search_term and api_key and obj_type != "submodule":
+                print("**Example:**")
                 print()
-        elif not search_term:
-            print(f"*💡 Use `pyapi {module_name} {name.lower()}` to see code examples*")
-            print()
+                example, output = get_code_example(module_name, name, sig, doc)
+                print(example)
+                print()
+                
+                if output:
+                    print("**Output:**")
+                    print()
+                    print("```")
+                    print(output)
+                    print("```")
+                    print()
+            elif not search_term and obj_type != "submodule":
+                print(f"*💡 Use `pyapi {module_name} {name.lower()}` to see code examples*")
+                print()
         
         print("---")
         print()
         
-except ModuleNotFoundError:
-    print(f"❌ Module '{module_name}' not found. Try: pip install {module_name}")
+except Exception as e:
+    print(f"❌ Error: {e}")
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 PYEOF
     
-    # Check if Python script succeeded
     if [ $? -ne 0 ]; then
         cat "$tmpfile"
         rm "$tmpfile"
         return 1
     fi
     
-    # Render markdown with glow
     cat "$tmpfile" | glow -w 80 -
     rm "$tmpfile"
 }
