@@ -125,9 +125,9 @@ function parse_git_branch() {
      git branch 2> /dev/null | sed -e '/^[^*]/d' -e 's/* \(.*\)/[\1]/'
 }
 
-if [[ $AWS_PROFILE == 326869200699-/OktaInfrastructure ]]; then
+if [[ $AWS_PROFILE == 2222222222222-/devops ]]; then
     account_id=Development
-elif [[ $AWS_PROFILE == 183547466896-/OktaInfrastructure ]]; then
+elif [[ $AWS_PROFILE == 1111111111111-/devops ]]; then
     account_id=DevOps
 else
     account_id=none
