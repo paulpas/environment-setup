@@ -170,6 +170,251 @@ function aws_enable_ebs_encryption () {
     done
 }
 
+pyapi() {
+    if [ -z "$1" ]; then
+        echo "Usage: pyapi <module_name> [search_term]"
+        return 1
+    fi
+    
+    if ! command -v glow &> /dev/null; then
+        echo "❌ Error: 'glow' is required but not installed."
+        return 1
+    fi
+    
+    local tmpfile=$(mktemp)
+    
+    MODULE_NAME="$1" SEARCH_TERM="${2:-}" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" python3 << 'PYEOF' > "$tmpfile" 2>&1
+import sys, importlib, inspect, os, json, subprocess, re
+from urllib.request import Request, urlopen
+module_name = os.environ.get("MODULE_NAME", "")
+search_term = os.environ.get("SEARCH_TERM", "").lower()
+api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+if not module_name:
+    print("Error: No module specified")
+    sys.exit(1)
+def extract_code_from_markdown(text):
+    """Extract Python code from markdown code blocks"""
+    pattern = r'```python\s*\n(.*?)```'
+    matches = re.findall(pattern, text, re.DOTALL)
+    return matches[0] if matches else text
+def execute_code(code):
+    """Execute Python code and capture output"""
+    try:
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write(code)
+            temp_file = f.name
+        
+        result = subprocess.run(
+            ['python3', temp_file],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        os.unlink(temp_file)
+        
+        output = ""
+        if result.stdout:
+            output += result.stdout
+        if result.stderr:
+            output += "\nErrors:\n" + result.stderr
+        
+        return output.strip() if output.strip() else "(no output)", result.returncode
+        
+    except subprocess.TimeoutExpired:
+        return "(execution timed out after 5 seconds)", 1
+    except Exception as e:
+        return f"(execution error: {e})", 1
+def get_code_example(module_name, func_name, sig, doc):
+    """Get AI-generated code example for a function"""
+    if not api_key:
+        return "*Set ANTHROPIC_API_KEY to see code examples*", ""
+    
+    prompt = f"""Generate a SHORT executable Python code example for this function:
+Function: {func_name}{sig}
+Module: {module_name}
+Doc: {doc[:200]}
+CRITICAL REQUIREMENTS:
+- MUST be complete, standalone, executable code (5-8 lines max)
+- MUST print something to show the output
+- Include necessary imports
+- For Flask/web frameworks: use app.app_context() or create minimal working context
+- For functions that return objects: print the result or relevant attributes
+- Use realistic but simple example data
+- Add brief inline comments
+- No servers, no async, no user input - just code that runs and prints
+Example format:
+```python
+from flask import Flask, jsonify
+app = Flask(__name__)
+with app.app_context():
+    response = jsonify(name="John", age=30)
+    print(response.get_json())  # Output the JSON data
+```
+Provide ONLY the code in a ```python block."""
+    try:
+        data = json.dumps({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 600,
+            "messages": [{"role": "user", "content": prompt}]
+        }).encode()
+        req = Request(
+            "https://api.anthropic.com/v1/messages",
+            data=data,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            }
+        )
+        response = urlopen(req)
+        result = json.loads(response.read())
+        example_text = result["content"][0]["text"]
+        
+        # Extract and execute code
+        code = extract_code_from_markdown(example_text)
+        output, returncode = execute_code(code)
+        
+        # If execution failed, ask AI to fix it
+        if returncode != 0:
+            fix_prompt = f"""The following code example FAILED with this error:
+```python
+{code}
+```
+Error output:
+{output}
+
+Generate a FIXED version that will execute successfully. Follow the same requirements:
+- MUST be complete, standalone, executable code (5-8 lines max)
+- MUST print something to show the output
+- Include necessary imports
+- For Flask/web frameworks: use app.app_context() or create minimal working context
+- Use realistic but simple example data
+- No servers, no async, no user input
+
+Provide ONLY the fixed code in a ```python block."""
+            
+            fix_data = json.dumps({
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 600,
+                "messages": [{"role": "user", "content": fix_prompt}]
+            }).encode()
+            
+            fix_req = Request(
+                "https://api.anthropic.com/v1/messages",
+                data=fix_data,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                }
+            )
+            fix_response = urlopen(fix_req)
+            fix_result = json.loads(fix_response.read())
+            example_text = fix_result["content"][0]["text"]
+            
+            # Try executing the fixed code
+            fixed_code = extract_code_from_markdown(example_text)
+            output, returncode = execute_code(fixed_code)
+        
+        return example_text, output
+    except Exception as e:
+        return f"*Could not generate example: {e}*", ""
+try:
+    mod = importlib.import_module(module_name)
+    
+    items = []
+    for name in sorted(dir(mod)):
+        if not name.startswith("_"):
+            if search_term and search_term not in name.lower():
+                continue
+            obj = getattr(mod, name)
+            if callable(obj):
+                doc = (inspect.getdoc(obj) or "").split("\n")[0]
+                sig = ""
+                try:
+                    sig = str(inspect.signature(obj))
+                except:
+                    sig = "(...)"
+                
+                obj_type = "function"
+                if inspect.isclass(obj):
+                    obj_type = "class"
+                elif inspect.ismethod(obj):
+                    obj_type = "method"
+                    
+                items.append((name, sig, doc, obj_type))
+    
+    if not items:
+        print(f"No {'matching ' if search_term else ''}functions found in '{module_name}'")
+        sys.exit(0)
+    
+    # Build markdown output
+    print(f"# 📚 `{module_name}` API Reference")
+    print()
+    
+    if search_term:
+        print(f"🔍 **Filter:** `{search_term}`")
+        print()
+    
+    print(f"**Total:** {len(items)} callable(s)")
+    print()
+    print("---")
+    print()
+    
+    for name, sig, doc, obj_type in items:
+        emoji = "🔧" if obj_type == "function" else "📦" if obj_type == "class" else "⚙️"
+        
+        print(f"## {emoji} `{name}`")
+        print()
+        print("**Signature:**")
+        print()
+        print("```python")
+        print(f"{name}{sig}")
+        print("```")
+        print()
+        
+        if doc:
+            print(f"**Description:** {doc}")
+            print()
+        
+        # Generate and execute code example (only when filtering)
+        if search_term and api_key:
+            print("**Example:**")
+            print()
+            example, output = get_code_example(module_name, name, sig, doc)
+            print(example)
+            print()
+            
+            if output:
+                print("**Output:**")
+                print()
+                print("```")
+                print(output)
+                print("```")
+                print()
+        elif not search_term:
+            print(f"*💡 Use `pyapi {module_name} {name.lower()}` to see code examples*")
+            print()
+        
+        print("---")
+        print()
+        
+except ModuleNotFoundError:
+    print(f"❌ Module '{module_name}' not found. Try: pip install {module_name}")
+    sys.exit(1)
+PYEOF
+    
+    if [ $? -ne 0 ]; then
+        cat "$tmpfile"
+        rm "$tmpfile"
+        return 1
+    fi
+    
+    cat "$tmpfile" | glow -w 80 -
+    rm "$tmpfile"
+}
 export PS1="\u:\w\[\e[40m\]:[\[\e[m\]\[\e[44m\]aws::${account_id}\[\e[m\]]-[\[\e[m\]\[\e[44m\]k8s::$(currentk8s)\[\e[m\]]-[\[\e[m\]\[\e[44m\]tfver::$(currentTFversion)\[\e[m\]]-[\[\e[m\]\[\e[44m\]tfwrk::$(currentTFworkspace)\[\e[m\]]-((\e[44m\]git::$(parse_git_branch)\[\e[m\])):\n └─\[\033[0m\033[0;32m\] `[ $(id -u) == "0" ] && echo "#" || echo '$'` \[\033[0m\033[0;32m\] ▶\[\033[0m\] "
 PROMPT_COMMAND="source ~/bashrc"
 
